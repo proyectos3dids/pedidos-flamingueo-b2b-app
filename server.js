@@ -193,11 +193,26 @@ app.post('/api/complete-draft-order', async (req, res) => {
     
     console.log('Payment terms templates response:', JSON.stringify(paymentTermsResponse.data, null, 2));
     
-    // Buscar plantilla NET_30
-    const templates = paymentTermsResponse.data.data.paymentTermsTemplates.edges;
-    const net30Template = templates.find(edge => 
-      edge.node.paymentTermsType === 'NET' && edge.node.dueInDays === 30
-    );
+    // Verificar si la respuesta tiene errores o datos válidos
+    if (paymentTermsResponse.data.errors) {
+      console.error('GraphQL errors in payment terms query:', paymentTermsResponse.data.errors);
+      // Continuar sin términos de pago si hay errores
+    }
+    
+    let net30Template = null;
+    
+    // Verificar que la estructura de datos sea válida antes de acceder
+    if (paymentTermsResponse.data.data && 
+        paymentTermsResponse.data.data.paymentTermsTemplates && 
+        paymentTermsResponse.data.data.paymentTermsTemplates.edges) {
+      
+      const templates = paymentTermsResponse.data.data.paymentTermsTemplates.edges;
+      net30Template = templates.find(edge => 
+        edge.node.paymentTermsType === 'NET' && edge.node.dueInDays === 30
+      );
+    } else {
+      console.log('Payment terms templates not available or invalid structure');
+    }
     
     if (net30Template) {
       console.log('Found NET_30 template:', net30Template.node);
@@ -248,7 +263,11 @@ app.post('/api/complete-draft-order', async (req, res) => {
       
       console.log('Set payment terms response:', JSON.stringify(setPaymentTermsResponse.data, null, 2));
       
-      if (setPaymentTermsResponse.data.data.draftOrderUpdate.userErrors.length > 0) {
+      // Verificar la estructura de la respuesta antes de acceder a userErrors
+      if (setPaymentTermsResponse.data.data && 
+          setPaymentTermsResponse.data.data.draftOrderUpdate && 
+          setPaymentTermsResponse.data.data.draftOrderUpdate.userErrors && 
+          setPaymentTermsResponse.data.data.draftOrderUpdate.userErrors.length > 0) {
         console.error('Error setting payment terms:', setPaymentTermsResponse.data.data.draftOrderUpdate.userErrors);
       }
     } else {
@@ -296,7 +315,16 @@ app.post('/api/complete-draft-order', async (req, res) => {
     
     console.log('Complete draft order response:', JSON.stringify(completeResponse.data, null, 2));
     
-    if (completeResponse.data.data.draftOrderComplete.userErrors.length > 0) {
+    // Verificar la estructura de la respuesta antes de acceder a los datos
+    if (!completeResponse.data.data || !completeResponse.data.data.draftOrderComplete) {
+      return res.status(500).json({
+        success: false,
+        error: 'Invalid response structure from Shopify API'
+      });
+    }
+    
+    if (completeResponse.data.data.draftOrderComplete.userErrors && 
+        completeResponse.data.data.draftOrderComplete.userErrors.length > 0) {
       return res.status(400).json({
         success: false,
         error: completeResponse.data.data.draftOrderComplete.userErrors[0].message
