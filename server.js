@@ -785,22 +785,16 @@ app.post('/api/add-recargo-equivalencia', async (req, res) => {
         return lineItem;
       }) : [];
 
-    // Existing line items will be preserved
-
-    // Check if recargo already exists (only if there are existing items)
-    const recargoExists = existingLineItems.length > 0 && existingLineItems.some(item => 
-      item.title && item.title.includes('Recargo de Equivalencia')
+    // Filter out any existing recargo items to replace them with the correct one
+    const filteredLineItems = existingLineItems.filter(item => 
+      !item.title || !item.title.includes('Recargo de Equivalencia')
     );
 
-    if (recargoExists) {
-      return res.status(400).json({ 
-        error: 'El recargo de equivalencia ya existe en este draft order' 
-      });
-    }
+    console.log(`Recargos existentes eliminados: ${existingLineItems.length - filteredLineItems.length}`);
 
-    // Add the new recargo line item to existing items (or create new array if no existing items)
+    // Add the new recargo line item to filtered items (or create new array if no existing items)
     const allLineItems = [
-      ...existingLineItems,
+      ...filteredLineItems,
       {
         title: "Recargo de Equivalencia (5.2%)",
         quantity: 1,
@@ -809,6 +803,8 @@ app.post('/api/add-recargo-equivalencia', async (req, res) => {
         taxable: false
       }
     ];
+
+    console.log(`Total line items después de añadir recargo: ${allLineItems.length}`);
 
     // All line items prepared (existing + recargo)
 
