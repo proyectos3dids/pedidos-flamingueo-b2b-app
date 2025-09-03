@@ -1,0 +1,22 @@
+{
+  "name": "apporders",
+  "version": "1.0.0",
+  "description": "Aquí tienes instrucciones detalladas para crear un sistema que agregue una opción \"Crear pedido final\" en el Admin de Shopify (y que pueda incrustarse en POS), que al pulsar comunique con tu servidor (por ejemplo, desplegado en Render) y complete el pedido draft usando la API de Shopify. * * * ## 1\\. Pre-requisitos *   Cuenta de [Shopify Partner](https://partners.shopify.com/). *   Una tienda de desarrollo. *   [Shopify CLI](https://shopify.dev/docs/apps/tools/cli/installation) instalado. *   Node.js 18+. *   Cuenta en [Render](https://render.com/) para desplegar tu backend. * * * ## 2\\. Crea tu app de Shopify",
+  "main": "index.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "build": "echo \"No build step required\"",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "axios": "^1.11.0",
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.2",
+    "express": "^5.1.0"
+  }
+}
