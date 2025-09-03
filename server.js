@@ -779,6 +779,84 @@ app.post('/api/add-recargo-equivalencia', async (req, res) => {
   }
 });
 
+// Get all draft orders endpoint
+app.get('/api/draft-orders', async (req, res) => {
+  try {
+    if (!SHOPIFY_STORE_URL || !SHOPIFY_ACCESS_TOKEN) {
+      return res.status(500).json({ 
+        error: 'Shopify configuration is missing' 
+      });
+    }
+
+    // GraphQL query to get draft orders
+    const query = `
+      query {
+        draftOrders(first: 50, query: "status:open") {
+          edges {
+            node {
+              id
+              name
+              createdAt
+              updatedAt
+              totalPrice
+              subtotalPrice
+              currencyCode
+              customer {
+                displayName
+                email
+              }
+              lineItems(first: 3) {
+                edges {
+                  node {
+                    title
+                    quantity
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    `;
+
+    const response = await axios.post(
+      `https://${SHOPIFY_STORE_URL}/admin/api/2023-10/graphql.json`,
+      { query },
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN
+        }
+      }
+    );
+
+    const { data, errors } = response.data;
+
+    if (errors) {
+      console.error('GraphQL errors:', errors);
+      return res.status(400).json({ 
+        error: 'GraphQL errors', 
+        details: errors 
+      });
+    }
+
+    res.json({
+      success: true,
+      draftOrders: data.draftOrders.edges.map(edge => edge.node)
+    });
+  } catch (error) {
+    console.error('Error getting draft orders:', error.message);
+    if (error.response) {
+      console.error('Axios response status:', error.response.status);
+      console.error('Axios response data:', error.response.data);
+    }
+    res.status(500).json({ 
+      error: 'Internal server error', 
+      message: error.message 
+    });
+  }
+});
+
 // Get draft order details endpoint
 app.get('/api/draft-order/:id', async (req, res) => {
   try {
