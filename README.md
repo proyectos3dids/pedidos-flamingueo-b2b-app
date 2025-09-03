@@ -135,4 +135,4 @@ Para que tu app pueda incrustarse en Shopify POS:
 *   [Embed app in Shopify POS](https://shopify.dev/docs/apps/build/pos/embed-app-in-pos)
 *   [Shopify CLI](https://shopify.dev/docs/apps/tools/cli)
 *   [Node.js](https://nodejs.org/)
-*   [Render](https://render.com/)
+*   [Render](https://render.com/)# Force redeploy Wed Sep  3 04:54:26 CEST 2025
