@@ -167,15 +167,11 @@ app.post('/api/complete-draft-order', async (req, res) => {
     // Obtener plantillas de términos de pago disponibles
     const paymentTermsQuery = `
       query {
-        paymentTermsTemplates(first: 10) {
-          edges {
-            node {
-              id
-              name
-              paymentTermsType
-              dueInDays
-            }
-          }
+        paymentTermsTemplates {
+          id
+          name
+          paymentTermsType
+          dueInDays
         }
       }
     `;
@@ -204,18 +200,18 @@ app.post('/api/complete-draft-order', async (req, res) => {
     // Verificar que la estructura de datos sea válida antes de acceder
     if (paymentTermsResponse.data.data && 
         paymentTermsResponse.data.data.paymentTermsTemplates && 
-        paymentTermsResponse.data.data.paymentTermsTemplates.edges) {
+        Array.isArray(paymentTermsResponse.data.data.paymentTermsTemplates)) {
       
-      const templates = paymentTermsResponse.data.data.paymentTermsTemplates.edges;
-      net30Template = templates.find(edge => 
-        edge.node.paymentTermsType === 'NET' && edge.node.dueInDays === 30
+      const templates = paymentTermsResponse.data.data.paymentTermsTemplates;
+      net30Template = templates.find(template => 
+        template.paymentTermsType === 'NET' && template.dueInDays === 30
       );
     } else {
       console.log('Payment terms templates not available or invalid structure');
     }
     
     if (net30Template) {
-      console.log('Found NET_30 template:', net30Template.node);
+      console.log('Found NET_30 template:', net30Template);
       
       // Establecer términos de pago NET_30
       const setPaymentTermsMutation = `
@@ -242,7 +238,10 @@ app.post('/api/complete-draft-order', async (req, res) => {
         id: draftOrderId,
         input: {
           paymentTerms: {
-            paymentTermsTemplateId: net30Template.node.id
+            paymentTermsTemplateId: net30Template.id,
+            paymentSchedules: [{
+              issuedAt: new Date().toISOString()
+            }]
           }
         }
       };
@@ -284,7 +283,6 @@ app.post('/api/complete-draft-order', async (req, res) => {
             order {
               id
               name
-              financialStatus
             }
           }
           userErrors {
