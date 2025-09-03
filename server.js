@@ -317,9 +317,19 @@ app.post('/api/complete-draft-order', async (req, res) => {
     
     // Verificar la estructura de la respuesta antes de acceder a los datos
     if (!completeResponse.data.data || !completeResponse.data.data.draftOrderComplete) {
+      console.error('Invalid response structure detected:');
+      console.error('Response data:', JSON.stringify(completeResponse.data, null, 2));
+      console.error('Has data property:', !!completeResponse.data.data);
+      console.error('Has draftOrderComplete property:', !!(completeResponse.data.data && completeResponse.data.data.draftOrderComplete));
+      
       return res.status(500).json({
         success: false,
-        error: 'Invalid response structure from Shopify API'
+        error: 'Invalid response structure from Shopify API',
+        details: {
+          hasData: !!completeResponse.data.data,
+          hasDraftOrderComplete: !!(completeResponse.data.data && completeResponse.data.data.draftOrderComplete),
+          actualResponse: completeResponse.data
+        }
       });
     }
     
