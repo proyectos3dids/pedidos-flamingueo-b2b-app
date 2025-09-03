@@ -48,7 +48,7 @@ app.post('/api/verify-draft-order', async (req, res) => {
       });
     }
 
-    // GraphQL query to get basic draft order info
+    // GraphQL query to get complete draft order info with all price fields
     const query = `
       query getDraftOrder($id: ID!) {
         draftOrder(id: $id) {
@@ -62,12 +62,43 @@ app.post('/api/verify-draft-order', async (req, res) => {
               currencyCode
             }
           }
-          lineItems(first: 5) {
+          lineItems(first: 10) {
             edges {
               node {
                 id
                 title
                 quantity
+                originalUnitPrice
+                discountedUnitPrice
+                originalUnitPriceSet {
+                  shopMoney {
+                    amount
+                    currencyCode
+                  }
+                }
+                discountedUnitPriceSet {
+                  shopMoney {
+                    amount
+                    currencyCode
+                  }
+                }
+                originalTotalSet {
+                  shopMoney {
+                    amount
+                    currencyCode
+                  }
+                }
+                discountedTotalSet {
+                  shopMoney {
+                    amount
+                    currencyCode
+                  }
+                }
+                appliedDiscount {
+                  amount
+                  title
+                  description
+                }
               }
             }
           }
@@ -114,6 +145,9 @@ app.post('/api/verify-draft-order', async (req, res) => {
     }
 
     const draftOrder = response.data.data.draftOrder;
+    
+    // Log complete draft order data for debugging
+    console.log('📋 Draft Order completo:', JSON.stringify(draftOrder, null, 2));
     
     if (!draftOrder) {
       return res.status(404).json({
@@ -571,22 +605,15 @@ app.post('/complete-draft-order', async (req, res) => {
 
 // Add recargo equivalencia endpoint
 app.post('/api/add-recargo-equivalencia', async (req, res) => {
-  const { draftOrderId, recargoAmount, subtotal } = req.body;
+  const { draftOrderId } = req.body;
   
-  // Información del recargo: €${recargoAmount} (5.2% de €${subtotal})
-    console.log(`Añadiendo Recargo de Equivalencia: €${recargoAmount} (5.2% de €${subtotal}) al Draft Order ${draftOrderId}`);
+  console.log(`Añadiendo Recargo de Equivalencia al Draft Order ${draftOrderId}`);
   
   try {
     
     if (!draftOrderId) {
       return res.status(400).json({ 
         error: 'Draft order ID is required' 
-      });
-    }
-
-    if (!recargoAmount || recargoAmount <= 0) {
-      return res.status(400).json({ 
-        error: 'Recargo amount must be greater than 0' 
       });
     }
 
@@ -597,7 +624,7 @@ app.post('/api/add-recargo-equivalencia', async (req, res) => {
     }
 
     // First, get existing line items from the draft order
-    // Getting existing line items to preserve them
+    // Getting existing line items to preserve them with all properties
     const getLineItemsQuery = `
       query getDraftOrder($id: ID!) {
         draftOrder(id: $id) {
@@ -609,8 +636,55 @@ app.post('/api/add-recargo-equivalencia', async (req, res) => {
                 title
                 quantity
                 originalUnitPrice
+                discountedUnitPrice
+                originalUnitPriceWithCurrency {
+                  amount
+                  currencyCode
+                }
                 requiresShipping
                 taxable
+                sku
+                uuid
+                vendor
+                variantTitle
+                custom
+                image {
+                  id
+                  url
+                  altText
+                  width
+                  height
+                }
+                product {
+                  id
+                  title
+                  handle
+                }
+                variant {
+                  id
+                  title
+                  sku
+                  price
+                  compareAtPrice
+                  image {
+                    id
+                    url
+                    altText
+                  }
+                }
+                customAttributes {
+                  key
+                  value
+                }
+                weight {
+                  unit
+                  value
+                }
+                appliedDiscount {
+                  description
+                  value
+                  valueType
+                }
               }
             }
           }
@@ -642,6 +716,40 @@ app.post('/api/add-recargo-equivalencia', async (req, res) => {
       });
     }
 
+    // Calculate subtotal from existing line items
+    let subtotal = 0;
+    const lineItemsData = getResponse.data.data.draftOrder.lineItems.edges || [];
+    
+    lineItemsData.forEach(edge => {
+      const node = edge.node;
+      
+      // Skip existing "Recargo de Equivalencia" items from subtotal calculation
+      if (node.title && node.title.includes('Recargo de Equivalencia')) {
+        console.log(`Saltando recargo existente: ${node.title}`);
+        return;
+      }
+      
+      // Use discounted price if available, otherwise use original price
+      const price = parseFloat(node.discountedUnitPrice) || parseFloat(node.originalUnitPrice) || 0;
+      const quantity = parseInt(node.quantity) || 0;
+      const lineTotal = price * quantity;
+      console.log(`Line item: ${node.title} - Precio con descuento: €${price} x ${quantity} = €${lineTotal.toFixed(2)}`);
+      subtotal += lineTotal;
+    });
+    
+    console.log(`Subtotal calculado: €${subtotal.toFixed(2)}`);
+    
+    // Calculate recargo amount (5.2% of subtotal)
+    const recargoAmount = subtotal * 0.052;
+    
+    if (recargoAmount <= 0) {
+      return res.status(400).json({ 
+        error: 'Recargo amount must be greater than 0. El draft order debe tener productos con precio.' 
+      });
+    }
+    
+    console.log(`Recargo calculado: €${recargoAmount.toFixed(2)} (5.2% de €${subtotal.toFixed(2)})`);
+
     // Extract existing line items (handle case when no items exist)
     const existingLineItems = getResponse.data.data.draftOrder.lineItems.edges ? 
       getResponse.data.data.draftOrder.lineItems.edges.map(edge => {
@@ -654,9 +762,24 @@ app.post('/api/add-recargo-equivalencia', async (req, res) => {
           taxable: node.taxable
         };
         
-        // Add variantId if it exists
-        if (node.variantId) {
-          lineItem.variantId = node.variantId;
+        // Only include valid fields for DraftOrderLineItemInput
+        if (node.variant && node.variant.id) {
+          lineItem.variantId = node.variant.id;
+        }
+        
+        if (node.customAttributes && node.customAttributes.length > 0) {
+          lineItem.customAttributes = node.customAttributes.map(attr => ({
+            key: attr.key,
+            value: attr.value
+          }));
+        }
+        
+        if (node.appliedDiscount) {
+          lineItem.appliedDiscount = {
+            description: node.appliedDiscount.description,
+            value: node.appliedDiscount.value,
+            valueType: node.appliedDiscount.valueType
+          };
         }
         
         return lineItem;
@@ -681,7 +804,7 @@ app.post('/api/add-recargo-equivalencia', async (req, res) => {
       {
         title: "Recargo de Equivalencia (5.2%)",
         quantity: 1,
-        originalUnitPrice: recargoAmount.toString(),
+        originalUnitPrice: recargoAmount.toFixed(2),
         requiresShipping: false,
         taxable: false
       }
@@ -758,12 +881,13 @@ app.post('/api/add-recargo-equivalencia', async (req, res) => {
       });
     }
 
-    console.log(`✅ Recargo de Equivalencia añadido exitosamente: €${recargoAmount}`);
+    console.log(`✅ Recargo de Equivalencia añadido exitosamente: €${recargoAmount.toFixed(2)}`);
     res.json({
       success: true,
       message: 'Recargo de equivalencia añadido exitosamente',
       draftOrder: data.draftOrderUpdate.draftOrder,
-      recargoAmount: recargoAmount
+      recargoAmount: recargoAmount.toFixed(2),
+      subtotal: subtotal.toFixed(2)
     });
 
   } catch (error) {
