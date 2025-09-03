@@ -801,6 +801,10 @@ app.get('/api/draft-orders', async (req, res) => {
               totalPrice
               subtotalPrice
               currencyCode
+              customer {
+                displayName
+                email
+              }
               lineItems(first: 3) {
                 edges {
                   node {
