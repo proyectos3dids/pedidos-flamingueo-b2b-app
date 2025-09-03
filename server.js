@@ -573,8 +573,8 @@ app.post('/complete-draft-order', async (req, res) => {
 app.post('/api/add-recargo-equivalencia', async (req, res) => {
   const { draftOrderId, recargoAmount, subtotal } = req.body;
   
-  // Información del recargo: €${recargoAmount} (5.4% de €${subtotal})
-  console.log(`Añadiendo Recargo de Equivalencia: €${recargoAmount} (5.4% de €${subtotal}) al Draft Order ${draftOrderId}`);
+  // Información del recargo: €${recargoAmount} (5.2% de €${subtotal})
+    console.log(`Añadiendo Recargo de Equivalencia: €${recargoAmount} (5.2% de €${subtotal}) al Draft Order ${draftOrderId}`);
   
   try {
     
@@ -679,7 +679,7 @@ app.post('/api/add-recargo-equivalencia', async (req, res) => {
     const allLineItems = [
       ...existingLineItems,
       {
-        title: "Recargo de Equivalencia (5.4%)",
+        title: "Recargo de Equivalencia (5.2%)",
         quantity: 1,
         originalUnitPrice: recargoAmount.toString(),
         requiresShipping: false,
