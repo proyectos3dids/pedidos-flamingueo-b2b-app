@@ -11,8 +11,12 @@ app.use(cors());
 app.use(express.json());
 
 // Shopify API configuration
-const SHOPIFY_STORE_URL = process.env.SHOPIFY_STORE_URL; // e.g., 'your-store.myshopify.com'
-const SHOPIFY_ACCESS_TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;
+const isDevelopment = process.env.DEV_MODE === 'true';
+const SHOPIFY_STORE_URL = isDevelopment ? process.env.SHOPIFY_DEV_STORE_URL : process.env.SHOPIFY_STORE_URL;
+const SHOPIFY_ACCESS_TOKEN = isDevelopment ? process.env.SHOPIFY_DEV_ACCESS_TOKEN : process.env.SHOPIFY_ACCESS_TOKEN;
+
+console.log(`🔐 Usando tienda Shopify: ${SHOPIFY_STORE_URL} (${isDevelopment ? 'Desarrollo' : 'Producción'})`);
+
 
 // Health check endpoint
 app.get('/health', (req, res) => {
@@ -29,11 +33,220 @@ app.get('/api/test', (req, res) => {
   });
 });
 
+// Test endpoint to verify order ID
+app.post('/api/verify-order', async (req, res) => {
+  
+  try {
+    const { orderId } = req.body;
+    
+    if (!orderId) {
+      return res.status(400).json({ 
+        error: 'Order ID is required',
+        received: req.body
+      });
+    }
+
+    if (!SHOPIFY_STORE_URL || !SHOPIFY_ACCESS_TOKEN) {
+      return res.status(500).json({ 
+        error: 'Shopify configuration is missing'
+      });
+    }
+
+    // Convert numeric orderId to Shopify GID format if needed
+    let shopifyOrderId = orderId;
+    if (typeof orderId === 'number' || (typeof orderId === 'string' && !orderId.startsWith('gid://'))) {
+      shopifyOrderId = `gid://shopify/Order/${orderId}`;
+    }
+
+    console.log('🔍 Processing order ID:', { original: orderId, converted: shopifyOrderId });
+
+    // GraphQL query to get complete order info with all price fields including removed items
+    const query = `
+      query getOrder($id: ID!) {
+        order(id: $id) {
+          id
+          name
+          createdAt
+          subtotalPriceSet {
+            shopMoney {
+              amount
+              currencyCode
+            }
+          }
+          lineItems(first: 50) {
+            edges {
+              node {
+                id
+                title
+                quantity
+                originalUnitPriceSet {
+                  shopMoney {
+                    amount
+                    currencyCode
+                  }
+                }
+                discountedUnitPriceSet {
+                  shopMoney {
+                    amount
+                    currencyCode
+                  }
+                }
+                originalTotalSet {
+                  shopMoney {
+                    amount
+                    currencyCode
+                  }
+                }
+                discountedTotalSet {
+                  shopMoney {
+                    amount
+                    currencyCode
+                  }
+                }
+                discountAllocations {
+                  allocatedAmountSet {
+                    shopMoney {
+                      amount
+                      currencyCode
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    `;
+
+    // Retry mechanism for TLS connection issues
+    let response;
+    let retries = 3;
+    
+    while (retries > 0) {
+      try {
+        response = await axios.post(
+          `https://${SHOPIFY_STORE_URL}/admin/api/2023-10/graphql.json`,
+          {
+            query: query,
+            variables: { id: shopifyOrderId }
+          },
+          {
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN
+            },
+            timeout: 10000 // 10 second timeout
+          }
+        );
+        break; // Success, exit retry loop
+      } catch (networkError) {
+        retries--;
+        console.log(`🔄 Retry attempt ${4 - retries}/3 for order ${orderId}`);
+        
+        if (retries === 0) {
+          throw networkError; // Re-throw if all retries failed
+        }
+        
+        // Wait 1 second before retry
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+    }
+
+    const { data, errors } = response.data;
+
+    if (errors) {
+      console.error('GraphQL errors:', errors);
+      return res.status(400).json({ 
+        error: 'GraphQL errors', 
+        details: errors
+      });
+    }
+
+    if (!data.order) {
+      return res.status(404).json({ 
+        error: 'Order not found',
+        orderId: orderId
+      });
+    }
+
+    // Calculate subtotal from line items (using discounted prices when available)
+    let calculatedSubtotal = 0;
+    const lineItems = data.order.lineItems.edges || [];
+    let recargoExistente = false;
+    
+    console.log(`📋 Total line items encontrados: ${lineItems.length}`);
+    
+    lineItems.forEach((edge, index) => {
+      const node = edge.node;
+      const quantity = parseInt(node.quantity) || 0;
+      
+      console.log(`📦 Item ${index + 1}: "${node.title}" - Quantity: ${quantity}`);
+      
+      // Check if this is a recargo item (regardless of quantity for logging)
+      if (node.title && (node.title.includes('Recargo de Equivalencia') || node.title.toLowerCase().includes('recargo'))) {
+        console.log(`🔍 RECARGO DETECTADO: "${node.title}" - Quantity: ${quantity} - ${quantity > 0 ? 'ACTIVO' : 'ELIMINADO'}`);
+      }
+      
+      // Only include items with quantity > 0 (active items) in subtotal calculation
+      if (quantity > 0) {
+        // Check if there's already a "Recargo de Equivalencia" item (only active items)
+        if (node.title && (node.title.includes('Recargo de Equivalencia') || node.title.toLowerCase().includes('recargo'))) {
+          console.log(`🚨 Recargo existente ACTIVO encontrado: ${node.title} (quantity: ${quantity})`);
+          recargoExistente = true;
+          return; // Skip from subtotal calculation
+        }
+        
+        // Use discounted price if available, otherwise use original price
+        const discountedPrice = parseFloat(node.discountedUnitPriceSet?.shopMoney?.amount || 0);
+        const originalPrice = parseFloat(node.originalUnitPriceSet?.shopMoney?.amount || 0);
+        const price = discountedPrice > 0 ? discountedPrice : originalPrice;
+        const lineTotal = price * quantity;
+        
+        console.log(`Line item activo: ${node.title} - Precio: €${price} x ${quantity} = €${lineTotal.toFixed(2)}`);
+        calculatedSubtotal += lineTotal;
+      } else {
+        // Log removed items but don't consider them as existing surcharges
+        if (node.title && (node.title.includes('Recargo de Equivalencia') || node.title.toLowerCase().includes('recargo'))) {
+          console.log(`📋 Recargo ELIMINADO encontrado: ${node.title} (quantity: ${quantity}) - NO cuenta como existente`);
+        } else {
+          console.log(`Line item removido: ${node.title} (quantity: ${quantity}) - Excluido del subtotal`);
+        }
+      }
+    });
+    
+    console.log(`Subtotal calculado para order ${data.order.name}: €${calculatedSubtotal.toFixed(2)}`);
+    console.log(`Recargo existente: ${recargoExistente}`);
+
+    // Return order info with calculated subtotal and recargo status
+    res.json({
+      success: true,
+      order: {
+        id: data.order.id,
+        name: data.order.name,
+        subtotal: calculatedSubtotal.toFixed(2),
+        lineItemsCount: lineItems.length,
+        recargoExistente: recargoExistente
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Error verificando order:', error.message);
+    if (error.response) {
+      console.error('Shopify API Error:', error.response.status, error.response.data);
+    }
+    
+    res.status(500).json({ 
+      error: 'Internal server error', 
+      message: error.message
+    });
+  }
+});
+
 // Test endpoint to verify draft order ID
 app.post('/api/verify-draft-order', async (req, res) => {
   
   try {
-    const { draftOrderId } = req.body;
+    let { draftOrderId } = req.body;
     
     if (!draftOrderId) {
       return res.status(400).json({ 
@@ -41,6 +254,14 @@ app.post('/api/verify-draft-order', async (req, res) => {
         received: req.body
       });
     }
+    
+    // Verificar si el ID ya tiene el formato gid://shopify/DraftOrder/
+    if (!draftOrderId.startsWith('gid://shopify/DraftOrder/')) {
+      console.log('Convirtiendo ID numérico a formato global:', draftOrderId);
+      draftOrderId = `gid://shopify/DraftOrder/${draftOrderId}`;
+    }
+    
+    console.log('ID del draft order a consultar:', draftOrderId);
 
     if (!SHOPIFY_STORE_URL || !SHOPIFY_ACCESS_TOKEN) {
       return res.status(500).json({ 
@@ -608,6 +829,7 @@ app.post('/api/add-recargo-equivalencia', async (req, res) => {
   const { draftOrderId } = req.body;
   
   console.log(`Añadiendo Recargo de Equivalencia al Draft Order ${draftOrderId}`);
+  console.log('Datos recibidos completos:', JSON.stringify(req.body, null, 2));
   
   try {
     
@@ -716,6 +938,23 @@ app.post('/api/add-recargo-equivalencia', async (req, res) => {
       });
     }
 
+    // Get draft order details
+    const draftOrder = getResponse.data.data?.draftOrder;
+    
+    // Depurar la estructura completa de la respuesta
+    console.log('Estructura completa de getResponse:', JSON.stringify(getResponse.data, null, 2));
+    
+    if (!draftOrder) {
+      console.error('Error: Draft order not found in response');
+      return res.status(404).json({ 
+        error: 'Draft order not found', 
+        draftOrderId: draftOrderId 
+      });
+    }
+    
+    console.log(`Draft Order details: ID=${draftOrder.id}`);
+    console.log('Estructura completa del draftOrder:', JSON.stringify(draftOrder, null, 2));
+
     // Calculate subtotal from existing line items
     let subtotal = 0;
     const lineItemsData = getResponse.data.data.draftOrder.lineItems.edges || [];
@@ -748,7 +987,7 @@ app.post('/api/add-recargo-equivalencia', async (req, res) => {
       });
     }
     
-    console.log(`Recargo calculado: €${recargoAmount.toFixed(2)} (5.2% de €${subtotal.toFixed(2)})`);
+    console.log(`Recargo calculado: €${recargoAmount.toFixed(2)} (5.2% de €${subtotal.toFixed(2)}`);
 
     // Extract existing line items (handle case when no items exist)
     const existingLineItems = getResponse.data.data.draftOrder.lineItems.edges ? 
@@ -1051,6 +1290,495 @@ app.get('/api/draft-order/:id', async (req, res) => {
       console.error('Axios response status:', error.response.status);
       console.error('Axios response data:', error.response.data);
     }
+    res.status(500).json({ 
+      error: 'Internal server error', 
+      message: error.message 
+    });
+  }
+});
+
+// Add recargo equivalencia for edited orders endpoint
+app.post('/api/add-recargo-equivalencia-order', async (req, res) => {
+  console.log('🔍 [ADD-RECARGO] Iniciando proceso de añadir recargo');
+  console.log('📥 [ADD-RECARGO] Request body:', JSON.stringify(req.body, null, 2));
+  
+  try {
+    const { orderId } = req.body;
+    
+    console.log(`📋 [ADD-RECARGO] Parámetros recibidos:`);
+    console.log(`   - orderId: ${orderId}`);
+    
+    if (!orderId) {
+      console.log('❌ [ADD-RECARGO] Error: Order ID faltante');
+      return res.status(400).json({ 
+        error: 'Order ID is required',
+        received: req.body
+      });
+    }
+
+    if (!SHOPIFY_STORE_URL || !SHOPIFY_ACCESS_TOKEN) {
+      return res.status(500).json({ 
+        error: 'Shopify configuration is missing'
+      });
+    }
+
+    // Convert numeric orderId to Shopify GID format if needed
+    let shopifyOrderId = orderId;
+    if (typeof orderId === 'number' || (typeof orderId === 'string' && !orderId.startsWith('gid://'))) {
+      shopifyOrderId = `gid://shopify/Order/${orderId}`;
+    }
+
+    console.log(`🔄 [ADD-RECARGO] Procesando recargo para order: ${orderId} -> ${shopifyOrderId}`);
+    console.log(`🏪 [ADD-RECARGO] Store URL: ${SHOPIFY_STORE_URL}`);
+    console.log(`🔑 [ADD-RECARGO] Access Token disponible: ${SHOPIFY_ACCESS_TOKEN ? 'Sí' : 'No'}`);
+
+    // First, get order info to verify status and check if we can modify it
+    console.log('📊 [ADD-RECARGO] Obteniendo información de la orden...');
+    const getOrderQuery = `
+      query getOrder($id: ID!) {
+        order(id: $id) {
+          id
+          name
+          displayFinancialStatus
+          displayFulfillmentStatus
+          closed
+          lineItems(first: 50) {
+            edges {
+              node {
+                id
+                title
+                quantity
+                originalUnitPriceSet {
+                  shopMoney {
+                    amount
+                    currencyCode
+                  }
+                }
+                discountedUnitPriceSet {
+                  shopMoney {
+                    amount
+                    currencyCode
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    `;
+
+    const orderResponse = await axios.post(
+      `https://${SHOPIFY_STORE_URL}/admin/api/2023-10/graphql.json`,
+      {
+        query: getOrderQuery,
+        variables: { id: shopifyOrderId }
+      },
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN
+        }
+      }
+    );
+
+    console.log('📡 [ADD-RECARGO] Respuesta de Shopify API recibida');
+    const { data: orderData, errors: orderErrors } = orderResponse.data;
+
+    if (orderErrors) {
+      console.error('❌ [ADD-RECARGO] GraphQL errors getting order:', orderErrors);
+      return res.status(400).json({ 
+        error: 'Error getting order', 
+        details: orderErrors 
+      });
+    }
+
+    if (!orderData.order) {
+      console.log('❌ [ADD-RECARGO] Orden no encontrada');
+      return res.status(404).json({ 
+        error: 'Order not found',
+        orderId: orderId
+      });
+    }
+    
+    const order = orderData.order;
+    console.log(`📋 [ADD-RECARGO] Orden encontrada:`);
+    console.log(`   - ID: ${order.id}`);
+    console.log(`   - Name: ${order.name}`);
+    console.log(`   - Financial Status: ${order.displayFinancialStatus}`);
+    console.log(`   - Fulfillment Status: ${order.displayFulfillmentStatus}`);
+    console.log(`   - Closed: ${order.closed}`);
+
+    // Calculate subtotal (excluding existing recargo items)
+    let calculatedSubtotal = 0;
+    const lineItems = order.lineItems.edges || [];
+    
+    console.log(`🧮 [ADD-RECARGO] Calculando subtotal de ${lineItems.length} items...`);
+    
+    lineItems.forEach((edge, index) => {
+      const node = edge.node;
+      
+      // Skip existing "Recargo de Equivalencia" items
+      if (node.title && node.title.includes('Recargo de Equivalencia')) {
+        console.log(`⏭️ [ADD-RECARGO] Saltando recargo existente: ${node.title}`);
+        return;
+      }
+      
+      // Use discounted price if available, otherwise use original price
+      const discountedPrice = parseFloat(node.discountedUnitPriceSet?.shopMoney?.amount || 0);
+      const originalPrice = parseFloat(node.originalUnitPriceSet?.shopMoney?.amount || 0);
+      const price = discountedPrice > 0 ? discountedPrice : originalPrice;
+      const quantity = parseInt(node.quantity) || 0;
+      const lineTotal = price * quantity;
+      
+      console.log(`   Item ${index + 1}: ${node.title} - €${price} x ${quantity} = €${lineTotal.toFixed(2)}`);
+      calculatedSubtotal += lineTotal;
+    });
+
+    // Calculate recargo amount (5.2% of subtotal)
+    const finalRecargoAmount = calculatedSubtotal * 0.052;
+    
+    console.log(`💰 [ADD-RECARGO] Subtotal calculado: €${calculatedSubtotal.toFixed(2)}`);
+    console.log(`💰 [ADD-RECARGO] Recargo a añadir: €${finalRecargoAmount.toFixed(2)}`);
+    
+    // Check if order can be modified
+    if (order.closed) {
+      console.log('⚠️ [ADD-RECARGO] La orden está cerrada, no se puede modificar');
+      return res.json({
+        success: false,
+        message: 'La orden está cerrada y no puede ser modificada',
+        order: {
+          id: order.id,
+          name: order.name,
+          status: order.displayFinancialStatus,
+          subtotal: calculatedSubtotal.toFixed(2),
+          recargoAmount: finalRecargoAmount.toFixed(2),
+          canModify: false,
+          reason: 'Orden cerrada'
+        }
+      });
+    }
+
+    // Try to add line item using Order Edit API (for orders that support editing)
+    console.log('🔧 [ADD-RECARGO] Intentando añadir recargo usando Order Edit API...');
+    
+    try {
+      // First, create an order edit
+      const createEditMutation = `
+        mutation orderEditBegin($id: ID!) {
+          orderEditBegin(id: $id) {
+            calculatedOrder {
+              id
+              addedLineItems(first: 10) {
+                edges {
+                  node {
+                    id
+                    title
+                    quantity
+                  }
+                }
+              }
+              lineItems(first: 50) {
+                edges {
+                  node {
+                    id
+                    title
+                    quantity
+                  }
+                }
+              }
+            }
+            userErrors {
+              field
+              message
+            }
+          }
+        }
+      `;
+      
+      console.log('📝 [ADD-RECARGO] Creando order edit...');
+      const editResponse = await axios.post(
+        `https://${SHOPIFY_STORE_URL}/admin/api/2023-10/graphql.json`,
+        {
+          query: createEditMutation,
+          variables: { id: shopifyOrderId }
+        },
+        {
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN
+          }
+        }
+      );
+      
+      const editData = editResponse.data;
+      console.log('📝 [ADD-RECARGO] Respuesta de order edit:', JSON.stringify(editData, null, 2));
+      
+      if (editData.data?.orderEditBegin?.userErrors?.length > 0) {
+        const errors = editData.data.orderEditBegin.userErrors;
+        console.log('❌ [ADD-RECARGO] No se puede editar la orden:', errors);
+        
+        return res.json({
+          success: false,
+          message: 'No se puede editar esta orden',
+          order: {
+            id: order.id,
+            name: order.name,
+            status: order.displayFinancialStatus,
+            subtotal: calculatedSubtotal.toFixed(2),
+            recargoAmount: finalRecargoAmount.toFixed(2),
+            canModify: false,
+            reason: 'Orden no editable: ' + errors.map(e => e.message).join(', ')
+          },
+          errors: errors
+        });
+      }
+      
+      console.log('✅ [ADD-RECARGO] Order edit creado exitosamente');
+      
+      // Registrar los elementos añadidos y existentes
+      const addedLineItems = editData.data?.orderEditBegin?.calculatedOrder?.addedLineItems?.edges?.map(edge => edge.node) || [];
+      const lineItems = editData.data?.orderEditBegin?.calculatedOrder?.lineItems?.edges?.map(edge => edge.node) || [];
+      
+      if (addedLineItems.length > 0) {
+        console.log('📊 [ADD-RECARGO] Elementos añadidos al iniciar la edición:');
+        addedLineItems.forEach((item, index) => {
+          console.log(`  Elemento ${index + 1}: "${item.title}" - Cantidad: ${item.quantity}`);
+        });
+      }
+      
+      if (lineItems.length > 0) {
+        console.log('📊 [ADD-RECARGO] Elementos existentes al iniciar la edición:');
+        lineItems.forEach((item, index) => {
+          console.log(`  Elemento ${index + 1}: "${item.title}" - Cantidad: ${item.quantity}`);
+        });
+          
+      }
+      
+      const calculatedOrderId = editData.data.orderEditBegin.calculatedOrder.id;
+      console.log(`📝 [ADD-RECARGO] Calculated Order ID: ${calculatedOrderId}`);
+      
+      // Now add the recargo line item to the order edit
+      const addLineItemMutation = `
+        mutation orderEditAddCustomItem($id: ID!, $title: String!, $price: MoneyInput!, $quantity: Int!) {
+          orderEditAddCustomItem(id: $id, title: $title, price: $price, quantity: $quantity) {
+            calculatedLineItem {
+              id
+              title
+              quantity
+            }
+            calculatedOrder {
+              id
+              lineItems(first: 50) {
+                edges {
+                  node {
+                    id
+                    title
+                    quantity
+                  }
+                }
+              }
+            }
+            userErrors {
+              field
+              message
+            }
+          }
+        }
+      `;
+      
+      console.log('➕ [ADD-RECARGO] Añadiendo line item del recargo...');
+      const addItemResponse = await axios.post(
+        `https://${SHOPIFY_STORE_URL}/admin/api/2023-10/graphql.json`,
+        {
+          query: addLineItemMutation,
+          variables: {
+            id: calculatedOrderId,
+            title: 'Recargo de Equivalencia (5.2%)',
+            quantity: 1,
+            price: {
+              amount: finalRecargoAmount.toFixed(2),
+              currencyCode: 'EUR'
+            }
+          }
+        },
+        {
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN
+          }
+        }
+      );
+      
+      const addItemData = addItemResponse.data;
+      console.log('➕ [ADD-RECARGO] Respuesta de añadir line item:', JSON.stringify(addItemData, null, 2));
+      
+      if (addItemData.data?.orderEditAddCustomItem?.userErrors?.length > 0) {
+        const errors = addItemData.data.orderEditAddCustomItem.userErrors;
+        console.log('❌ [ADD-RECARGO] Error añadiendo line item:', errors);
+        
+        return res.json({
+          success: false,
+          message: 'No se pudo añadir el recargo al pedido',
+          order: {
+            id: order.id,
+            name: order.name,
+            status: order.displayFinancialStatus,
+            subtotal: calculatedSubtotal.toFixed(2),
+            recargoAmount: finalRecargoAmount.toFixed(2),
+            canModify: true,
+            reason: 'Error añadiendo line item: ' + errors.map(e => e.message).join(', ')
+          },
+          errors: errors
+        });
+      }
+      
+      console.log('✅ [ADD-RECARGO] Line item añadido exitosamente');
+      
+      // Registrar el elemento calculado añadido
+      const calculatedLineItem = addItemData.data?.orderEditAddCustomItem?.calculatedLineItem;
+      if (calculatedLineItem) {
+        console.log(`📦 [ADD-RECARGO] Elemento calculado añadido: ${calculatedLineItem.title} (ID: ${calculatedLineItem.id})`);
+        console.log(`   Cantidad: ${calculatedLineItem.quantity}`);
+      }
+      
+      // Registrar los elementos de la orden calculada
+      const calculatedOrder = addItemData.data?.orderEditAddCustomItem?.calculatedOrder;
+      const orderLineItems = calculatedOrder?.lineItems?.edges?.map(edge => edge.node) || [];
+      if (calculatedOrder && orderLineItems.length > 0) {
+        console.log('📊 [ADD-RECARGO] Elementos en la orden después de añadir el recargo:');
+        orderLineItems.forEach((item, index) => {
+          console.log(`  Elemento ${index + 1}: "${item.title}" - Cantidad: ${item.quantity}`);
+        });
+      }
+      
+      // Finally, commit the order edit
+      const commitEditMutation = `
+        mutation orderEditCommit($id: ID!) {
+          orderEditCommit(id: $id) {
+            order {
+              id
+              name
+              lineItems(first: 50) {
+                edges {
+                  node {
+                    id
+                    title
+                    quantity
+                  }
+                }
+              }
+            }
+            userErrors {
+              field
+              message
+            }
+          }
+        }
+      `;
+      
+      console.log('💾 [ADD-RECARGO] Confirmando cambios del order edit...');
+      const commitResponse = await axios.post(
+        `https://${SHOPIFY_STORE_URL}/admin/api/2023-10/graphql.json`,
+        {
+          query: commitEditMutation,
+          variables: { id: calculatedOrderId }
+        },
+        {
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN
+          }
+        }
+      );
+      
+      const commitData = commitResponse.data;
+      console.log('💾 [ADD-RECARGO] Respuesta de commit:', JSON.stringify(commitData, null, 2));
+      
+      if (commitData.data?.orderEditCommit?.userErrors?.length > 0) {
+        const errors = commitData.data.orderEditCommit.userErrors;
+        console.log('❌ [ADD-RECARGO] Error confirmando cambios:', errors);
+        
+        return res.json({
+          success: false,
+          message: 'No se pudieron confirmar los cambios del pedido',
+          order: {
+            id: order.id,
+            name: order.name,
+            status: order.displayFinancialStatus,
+            subtotal: calculatedSubtotal.toFixed(2),
+            recargoAmount: finalRecargoAmount.toFixed(2),
+            canModify: true,
+            reason: 'Error confirmando cambios: ' + errors.map(e => e.message).join(', ')
+          },
+          errors: errors
+        });
+      }
+      
+      console.log('🎉 [ADD-RECARGO] ¡Recargo añadido exitosamente al pedido!');
+      
+      // Registrar los elementos del pedido después de confirmar los cambios
+      const updatedOrder = commitData.data?.orderEditCommit?.order;
+      if (updatedOrder) {
+        console.log(`📋 [ADD-RECARGO] Pedido actualizado: ${updatedOrder.name} (ID: ${updatedOrder.id})`);
+        
+        // Registrar los elementos del pedido actualizado
+        const lineItems = updatedOrder.lineItems?.edges || [];
+        console.log(`📦 [ADD-RECARGO] Total de elementos en el pedido actualizado: ${lineItems.length}`);
+        
+        lineItems.forEach((edge, index) => {
+          const node = edge.node;
+          console.log(`  Elemento ${index + 1}: "${node.title}" - Cantidad: ${node.quantity}`);
+          
+          // Identificar el recargo añadido
+          if (node.title && (node.title.includes('Recargo de Equivalencia') || node.title.toLowerCase().includes('recargo'))) {
+            console.log(`  ✅ [ADD-RECARGO] Recargo confirmado en el pedido: "${node.title}" - Cantidad: ${node.quantity}`);
+          }
+        });
+      }
+      
+      // Return success with all details
+      res.json({
+        success: true,
+        message: 'Recargo añadido exitosamente al pedido',
+        order: {
+          id: order.id,
+          name: order.name,
+          status: order.displayFinancialStatus,
+          subtotal: calculatedSubtotal.toFixed(2),
+          recargoAmount: finalRecargoAmount.toFixed(2),
+          newTotal: (calculatedSubtotal + finalRecargoAmount).toFixed(2),
+          canModify: true,
+          editCreated: true,
+          lineItemAdded: true,
+          changesCommitted: true
+        }
+      });
+      
+    } catch (editError) {
+      console.error('❌ [ADD-RECARGO] Error creando order edit:', editError.message);
+      
+      // Return calculation info even if edit fails
+      res.json({
+        success: false,
+        message: 'No se pudo modificar la orden, pero el cálculo es correcto',
+        order: {
+          id: order.id,
+          name: order.name,
+          status: order.displayFinancialStatus,
+          subtotal: calculatedSubtotal.toFixed(2),
+          recargoAmount: finalRecargoAmount.toFixed(2),
+          canModify: false,
+          reason: 'Error técnico: ' + editError.message
+        }
+      });
+    }
+
+  } catch (error) {
+    console.error('❌ Error procesando recargo para order:', error.message);
+    if (error.response) {
+      console.error('Shopify API Error:', error.response.status, error.response.data);
+    }
+    
     res.status(500).json({ 
       error: 'Internal server error', 
       message: error.message 
