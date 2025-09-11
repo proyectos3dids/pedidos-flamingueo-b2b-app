@@ -64,3 +64,8 @@ Thumbs.db
 
 # Project specific
 crear-pedido-final/
+
+# Build files
+*.js.map
+.shopify/
+dist/

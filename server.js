@@ -58,7 +58,16 @@ app.post('/api/verify-order', async (req, res) => {
       shopifyOrderId = `gid://shopify/Order/${orderId}`;
     }
 
-    console.log('🔍 Processing order ID:', { original: orderId, converted: shopifyOrderId });
+    console.log('🔍 DEBUG - Processing order ID:', { 
+      original: orderId, 
+      originalType: typeof orderId,
+      converted: shopifyOrderId,
+      convertedType: typeof shopifyOrderId,
+      isNumeric: typeof orderId === 'number',
+      isStringNumeric: typeof orderId === 'string' && !isNaN(orderId),
+      startsWithGid: typeof orderId === 'string' && orderId.startsWith('gid://'),
+      requestBody: req.body
+    });
 
     // GraphQL query to get complete order info with all price fields including removed items
     const query = `
