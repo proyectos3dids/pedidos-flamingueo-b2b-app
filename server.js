@@ -1867,7 +1867,10 @@ app.post('/api/webhook/order-paid', async (req, res) => {
         console.log(`🔍 Consultando tags del cliente ID: ${order.customer.id}`);
         
         // Consultar la API de Shopify para obtener los tags del cliente
-        const customerResponse = await fetch(`${SHOPIFY_STORE_URL}/admin/api/2023-10/customers/${order.customer.id}.json`, {
+        const customerUrl = `https://${SHOPIFY_STORE_URL}/admin/api/2023-10/customers/${order.customer.id}.json`;
+        console.log(`🔗 URL de consulta: ${customerUrl}`);
+        
+        const customerResponse = await fetch(customerUrl, {
           headers: {
             'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
             'Content-Type': 'application/json'
