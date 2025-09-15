@@ -1844,6 +1844,11 @@ app.post('/api/webhook/order-paid', async (req, res) => {
 
     console.log(`🔍 Procesando pedido: ${order.name || orderId}`);
     
+    // Debug: Mostrar el JSON completo del pedido
+    console.log('🔍 DEBUG - JSON COMPLETO DEL PEDIDO:');
+    console.log(JSON.stringify(order, null, 2));
+    console.log('🔍 DEBUG - FIN DEL JSON DEL PEDIDO');
+    
     // Debug: Mostrar toda la información del cliente
     console.log('🔍 DEBUG - Información completa del cliente:', {
       customer: order.customer,
