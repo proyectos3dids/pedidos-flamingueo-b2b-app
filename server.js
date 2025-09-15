@@ -1858,9 +1858,38 @@ app.post('/api/webhook/order-paid', async (req, res) => {
       customerTagsType: typeof order.customer?.tags
     });
     
-    // Verificar si el cliente tiene el tag "RE"
-    const customerTags = order.customer?.tags || '';
-    const hasRETag = customerTags.split(',').map(tag => tag.trim().toUpperCase()).includes('RE');
+    // Los tags del cliente no vienen en el webhook, necesitamos consultarlos
+    let hasRETag = false;
+    let customerTags = '';
+    
+    if (order.customer?.id) {
+      try {
+        console.log(`🔍 Consultando tags del cliente ID: ${order.customer.id}`);
+        
+        // Consultar la API de Shopify para obtener los tags del cliente
+        const customerResponse = await fetch(`${SHOPIFY_STORE_URL}/admin/api/2023-10/customers/${order.customer.id}.json`, {
+          headers: {
+            'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
+            'Content-Type': 'application/json'
+          }
+        });
+        
+        if (customerResponse.ok) {
+          const customerData = await customerResponse.json();
+          customerTags = customerData.customer?.tags || '';
+          hasRETag = customerTags.split(',').map(tag => tag.trim().toUpperCase()).includes('RE');
+          
+          console.log(`✅ Tags del cliente obtenidos: "${customerTags}"`);
+          console.log(`🏷️ Cliente tiene tag "RE": ${hasRETag}`);
+        } else {
+          console.log(`❌ Error al consultar cliente: ${customerResponse.status} ${customerResponse.statusText}`);
+        }
+      } catch (error) {
+        console.log(`❌ Error al consultar tags del cliente: ${error.message}`);
+      }
+    } else {
+      console.log('❌ No se encontró ID del cliente en el pedido');
+    }
     
     if (!hasRETag) {
       console.log(`❌ Cliente sin tag "RE". Tags del cliente: "${customerTags}"`);
