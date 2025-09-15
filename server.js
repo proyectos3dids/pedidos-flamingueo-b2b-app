@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
+const crypto = require('crypto');
 require('dotenv').config();
 
 const app = express();
@@ -8,6 +9,11 @@ const PORT = process.env.PORT || 3000;
 
 // Middleware
 app.use(cors());
+
+// Middleware para webhooks (raw body needed for signature verification)
+app.use('/api/webhook', express.raw({ type: 'application/json' }));
+
+// Middleware para el resto de endpoints
 app.use(express.json());
 
 // Shopify API configuration
@@ -17,6 +23,24 @@ const SHOPIFY_ACCESS_TOKEN = isDevelopment ? process.env.SHOPIFY_DEV_ACCESS_TOKE
 
 console.log(`🔐 Usando tienda Shopify: ${SHOPIFY_STORE_URL} (${isDevelopment ? 'Desarrollo' : 'Producción'})`);
 
+// Función para verificar webhook signature de Shopify
+function verifyShopifyWebhook(data, signature) {
+  const webhookSecret = process.env.SHOPIFY_WEBHOOK_SECRET;
+  
+  if (!webhookSecret) {
+    console.log('⚠️ SHOPIFY_WEBHOOK_SECRET no configurado - saltando verificación');
+    return true; // En desarrollo, permitir sin verificación
+  }
+  
+  const hmac = crypto.createHmac('sha256', webhookSecret);
+  hmac.update(data, 'utf8');
+  const calculatedSignature = hmac.digest('base64');
+  
+  return crypto.timingSafeEqual(
+    Buffer.from(signature, 'base64'),
+    Buffer.from(calculatedSignature, 'base64')
+  );
+}
 
 // Health check endpoint
 app.get('/health', (req, res) => {
@@ -1795,10 +1819,114 @@ app.post('/api/add-recargo-equivalencia-order', async (req, res) => {
   }
 });
 
+// Webhook endpoint para recibir eventos de Shopify
+app.post('/api/webhook/order-paid', async (req, res) => {
+  try {
+    console.log('📦 Webhook recibido - Pedido pagado');
+    
+    // Verificar signature del webhook
+    const signature = req.get('X-Shopify-Hmac-Sha256');
+    if (!verifyShopifyWebhook(req.body, signature)) {
+      console.log('❌ Webhook signature inválida');
+      return res.status(200).json({ error: 'Unauthorized - Invalid signature' });
+    }
+    
+    console.log('✅ Webhook signature verificada');
+    
+    // Parsear datos del pedido
+    const order = JSON.parse(req.body.toString());
+    const orderId = order.id;
+    
+    if (!orderId) {
+      console.log('❌ No se encontró ID del pedido en el webhook');
+      return res.status(200).json({ message: 'No order ID found' }); // 200 para evitar reintentos
+    }
+
+    console.log(`🔍 Procesando pedido: ${order.name || orderId}`);
+    
+    // Verificar si el cliente tiene el tag "RE"
+    const customerTags = order.customer?.tags || '';
+    const hasRETag = customerTags.split(',').map(tag => tag.trim().toUpperCase()).includes('RE');
+    
+    if (!hasRETag) {
+      console.log(`❌ Cliente sin tag "RE". Tags del cliente: "${customerTags}"`);
+      return res.status(200).json({ 
+        message: 'Customer does not have RE tag - skipping recargo',
+        customerTags: customerTags
+      });
+    }
+    
+    console.log(`✅ Cliente tiene tag "RE". Procediendo con recargo.`);
+    
+    // Verificar si ya tiene recargo de equivalencia
+    const hasRecargo = order.line_items?.some(item => 
+      item.title?.toLowerCase().includes('recargo') || 
+      item.title?.toLowerCase().includes('equivalencia')
+    );
+    
+    if (hasRecargo) {
+      console.log('✅ El pedido ya tiene recargo de equivalencia');
+      return res.status(200).json({ message: 'Order already has recargo equivalencia' });
+    }
+
+    // Llamar al endpoint existente para añadir el recargo
+    console.log('🔄 Llamando a add-recargo-equivalencia-order...');
+    
+    try {
+      const recargoResponse = await axios.post(
+        `${req.protocol}://${req.get('host')}/api/add-recargo-equivalencia-order`,
+        { orderId: orderId },
+        {
+          headers: {
+            'Content-Type': 'application/json'
+          }
+        }
+      );
+      
+      console.log('🎉 Recargo añadido exitosamente via endpoint interno');
+      
+      return res.status(200).json({
+        success: true,
+        message: 'Recargo de equivalencia added successfully',
+        orderId: orderId,
+        orderName: order.name,
+        details: recargoResponse.data
+      });
+      
+    } catch (recargoError) {
+      console.error('❌ Error llamando a add-recargo-equivalencia-order:', recargoError.message);
+      
+      // Si el error es por pedido cerrado o ya procesado, devolver 200 para evitar reintentos
+      if (recargoError.response?.status === 400) {
+        return res.status(200).json({
+          message: 'Could not add recargo - order may be closed or already processed',
+          error: recargoError.response.data
+        });
+      }
+      
+      // Para otros errores, devolver 200 para evitar que Shopify deshabilite el webhook
+       return res.status(200).json({
+         error: 'Failed to add recargo',
+         message: recargoError.message
+       });
+    }
+
+  } catch (error) {
+    console.error('❌ Error en webhook:', error.message);
+    
+    // Devolver 200 para errores inesperados para evitar que Shopify deshabilite el webhook
+    return res.status(200).json({ 
+      error: 'Internal server error',
+      message: error.message
+    });
+  }
+});
+
 // Start server
 app.listen(PORT, () => {
   console.log(`🚀 Servidor ejecutándose en puerto ${PORT}`);
   console.log(`📋 Health check: http://localhost:${PORT}/health`);
+  console.log(`🪝 Webhook URL: https://pedido-flamingueo-b2b.onrender.com/api/webhook/order-paid`);
 });
 
 module.exports = app;
