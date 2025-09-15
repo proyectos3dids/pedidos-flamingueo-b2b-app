@@ -2,7 +2,7 @@ const axios = require('axios');
 const crypto = require('crypto');
 
 // Configuración del test
-const WEBHOOK_URL = 'http://localhost:3000/api/webhook/order-paid';
+const WEBHOOK_URL = process.env.WEBHOOK_URL || 'http://localhost:3000/api/webhook/order-paid';
 const WEBHOOK_SECRET = process.env.SHOPIFY_WEBHOOK_SECRET || 'test-secret';
 
 // Función para generar signature de Shopify
