@@ -1844,6 +1844,15 @@ app.post('/api/webhook/order-paid', async (req, res) => {
 
     console.log(`🔍 Procesando pedido: ${order.name || orderId}`);
     
+    // Debug: Mostrar toda la información del cliente
+    console.log('🔍 DEBUG - Información completa del cliente:', {
+      customer: order.customer,
+      customerId: order.customer?.id,
+      customerEmail: order.customer?.email,
+      customerTags: order.customer?.tags,
+      customerTagsType: typeof order.customer?.tags
+    });
+    
     // Verificar si el cliente tiene el tag "RE"
     const customerTags = order.customer?.tags || '';
     const hasRETag = customerTags.split(',').map(tag => tag.trim().toUpperCase()).includes('RE');
