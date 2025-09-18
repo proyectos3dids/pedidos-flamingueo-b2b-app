@@ -1072,7 +1072,7 @@ app.post('/api/add-recargo-equivalencia', async (req, res) => {
         quantity: 1,
         originalUnitPrice: recargoAmount.toFixed(2),
         requiresShipping: false,
-        taxable: false
+        taxable: false  // ← SIN IMPUESTOS: Evita que se apliquen impuestos al recargo
       }
     ];
 
@@ -1592,8 +1592,8 @@ app.post('/api/add-recargo-equivalencia-order', async (req, res) => {
       
       // Now add the recargo line item to the order edit
       const addLineItemMutation = `
-        mutation orderEditAddCustomItem($id: ID!, $title: String!, $price: MoneyInput!, $quantity: Int!) {
-          orderEditAddCustomItem(id: $id, title: $title, price: $price, quantity: $quantity) {
+        mutation orderEditAddCustomItem($id: ID!, $title: String!, $price: MoneyInput!, $quantity: Int!, $taxable: Boolean!) {
+          orderEditAddCustomItem(id: $id, title: $title, price: $price, quantity: $quantity, taxable: $taxable) {
             calculatedLineItem {
               id
               title
@@ -1631,7 +1631,8 @@ app.post('/api/add-recargo-equivalencia-order', async (req, res) => {
             price: {
               amount: finalRecargoAmount.toFixed(2),
               currencyCode: 'EUR'
-            }
+            },
+            taxable: false  // ← SIN IMPUESTOS: Evita que se apliquen impuestos al recargo
           }
         },
         {
